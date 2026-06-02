@@ -371,12 +371,6 @@ def extract_doc_pages_text(
             errors.append(f"LibreOffice: {exc}")
 
     if text is None:
-        try:
-            text = extract_doc_with_binary_fallback(doc_path)
-        except Exception as exc:
-            errors.append(f"Binary fallback: {exc}")
-
-    if text is None:
         raise RuntimeError(
             "Could not read .doc file. Install Microsoft Word, WPS Office, or LibreOffice "
             "(with pywin32 for COM automation).\n"
@@ -394,55 +388,6 @@ def extract_image_text(image_path: Path, ocr_languages: list[str]) -> list[str]:
     lang = "+".join(ocr_languages) if ocr_languages else "eng"
     text = pytesseract.image_to_string(image, lang=lang) or ""
     return [clean_text(text)] if text.strip() else []
-
-
-def extract_doc_with_binary_fallback(doc_path: Path) -> str:
-    """Best-effort text extraction from legacy .doc bytes.
-
-    This fallback is intentionally simple and used only when COM/libreoffice
-    are unavailable or blocked. It may include noise, but preserves usable
-    corpus content on locked-down systems.
-    """
-    raw = doc_path.read_bytes()
-    if not raw:
-        raise RuntimeError("Empty file.")
-
-    candidates = []
-    for encoding in ("utf-16le", "gb18030", "cp949", "utf-8", "latin-1"):
-        try:
-            decoded = raw.decode(encoding, errors="ignore")
-        except Exception:
-            continue
-        decoded = decoded.replace("\x00", "")
-        decoded = clean_text(decoded)
-        if len(decoded) > 20:
-            candidates.append(decoded)
-
-    if not candidates:
-        raise RuntimeError("Could not decode text from binary content.")
-
-    def score(text: str) -> int:
-        # Score by count of useful language chars.
-        return sum(ch.isalnum() or ("\u4e00" <= ch <= "\u9fff") for ch in text)
-
-    best = max(candidates, key=score)
-    # Keep only lines likely to contain human-readable content.
-    lines = []
-    for line in best.splitlines():
-        line = clean_text(line)
-        if len(line) < 2:
-            continue
-        useful = sum(
-            ch.isalnum() or ("\u4e00" <= ch <= "\u9fff") or ch in " .,;:!?-_/()[]{}"
-            for ch in line
-        )
-        if useful / max(len(line), 1) >= 0.55:
-            lines.append(line)
-
-    text = "\n".join(lines).strip()
-    if len(text) < 20:
-        raise RuntimeError("Binary fallback produced too little usable text.")
-    return text
 
 
 def extract_doc_with_com_subprocess(doc_path: Path, prog_ids: list[str]) -> str:

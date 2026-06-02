@@ -8,7 +8,7 @@ A production-style Python project that converts document files into raw corpus `
 - App icon and menu bar actions (including Open Output Folder)
 - Tesseract OCR executable path selection (`tesseract.exe`)
 - Automatic OCR language discovery from installed Tesseract language packs
-- Multi-language OCR selection (e.g., `eng`, `kor`, etc.)
+- Multi-language OCR selection (e.g., `eng`, `deu`, etc.)
 - Configurable Office COM ProgIDs for `.doc` extraction (Word/WPS/custom)
 - Single-file or full-folder conversion
 - Extension filtering in UI
