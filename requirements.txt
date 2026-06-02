@@ -1,0 +1,8 @@
+PyQt6
+PyMuPDF
+pdfplumber
+pytesseract
+Pillow
+python-docx
+pywin32
+pyinstaller
