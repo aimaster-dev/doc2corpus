@@ -28,8 +28,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app.config import DEFAULT_SUPPORTED_EXTENSIONS, ConversionConfig
+from app.config import DEFAULT_COM_PROG_IDS, DEFAULT_SUPPORTED_EXTENSIONS, ConversionConfig
 from app.services.extractors import get_tesseract_languages
+from app.services.system_check import run_system_checks
 from app.ui.worker import ConversionWorker
 
 
@@ -98,9 +99,12 @@ class MainWindow(QMainWindow):
         run_row = QHBoxLayout()
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
+        self.check_button = QPushButton("System Check")
+        self.check_button.clicked.connect(self._run_system_check)
         self.start_button = QPushButton("Start Conversion")
         self.start_button.clicked.connect(self._start_conversion)
         run_row.addWidget(self.progress_bar, stretch=1)
+        run_row.addWidget(self.check_button)
         run_row.addWidget(self.start_button)
         layout.addLayout(run_row)
 
@@ -129,6 +133,12 @@ class MainWindow(QMainWindow):
         self.lang_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
         self.lang_list.setMinimumHeight(220)
         form.addRow("Languages", self.lang_list)
+
+        self.com_prog_ids_input = QLineEdit(", ".join(DEFAULT_COM_PROG_IDS))
+        self.com_prog_ids_input.setPlaceholderText(
+            "COM ProgIDs (comma-separated), e.g. Word.Application, KWPS.Application"
+        )
+        form.addRow("Office COM ProgIDs", self.com_prog_ids_input)
         return group
 
     def _build_input_group(self) -> QGroupBox:
@@ -334,6 +344,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Extensions", "Select at least one extension.")
             return None
 
+        com_prog_ids = self._parse_com_prog_ids()
+        if not com_prog_ids:
+            QMessageBox.warning(
+                self,
+                "Missing COM ProgIDs",
+                "Please provide at least one Office COM ProgID.",
+            )
+            return None
+
         config = ConversionConfig(
             tesseract_path=Path(tesseract_text),
             ocr_languages=selected_langs,
@@ -341,8 +360,23 @@ class MainWindow(QMainWindow):
             min_text_chars_for_page=self.min_chars_spin.value(),
             enable_ocr_fallback=self.ocr_fallback_box.isChecked(),
             min_plain_text_length=self.min_plain_spin.value(),
+            office_com_prog_ids=com_prog_ids,
         )
         return Path(input_text), Path(output_text), config
+
+    def _parse_com_prog_ids(self) -> list[str]:
+        text = self.com_prog_ids_input.text().strip()
+        if not text:
+            return []
+        # Deduplicate while preserving user-defined order.
+        seen: set[str] = set()
+        result: list[str] = []
+        for token in text.split(","):
+            prog_id = token.strip()
+            if prog_id and prog_id not in seen:
+                result.append(prog_id)
+                seen.add(prog_id)
+        return result
 
     def _start_conversion(self) -> None:
         validated = self._validate_before_run()
@@ -365,6 +399,34 @@ class MainWindow(QMainWindow):
         self._worker.failed.connect(self._thread.quit)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.start()
+
+    def _run_system_check(self) -> None:
+        validated = self._validate_before_run()
+        if not validated:
+            return
+        _, _, config = validated
+        self._append_log("[CHECK] Running environment checks...")
+        results = run_system_checks(config)
+
+        ok_count = 0
+        fail_count = 0
+        lines: list[str] = []
+        for result in results:
+            status = "OK" if result.ok else "FAIL"
+            if result.ok:
+                ok_count += 1
+            else:
+                fail_count += 1
+            line = f"[{status}] {result.name}: {result.detail}"
+            lines.append(line)
+            self._append_log(line)
+
+        summary = f"System Check Complete\n\nPassed: {ok_count}\nFailed: {fail_count}"
+        detail = "\n".join(lines)
+        if fail_count == 0:
+            QMessageBox.information(self, "System Check", f"{summary}\n\n{detail}")
+        else:
+            QMessageBox.warning(self, "System Check", f"{summary}\n\n{detail}")
 
     def _on_progress(self, current: int, total: int) -> None:
         if total <= 0:
@@ -414,6 +476,7 @@ class MainWindow(QMainWindow):
         self._settings.setValue("options/ocr_fallback", self.ocr_fallback_box.isChecked())
         self._settings.setValue("options/extensions", self._selected_extensions())
         self._settings.setValue("options/languages", self._selected_languages())
+        self._settings.setValue("options/com_prog_ids", self._parse_com_prog_ids())
         self._settings.sync()
 
     def _load_settings(self) -> None:
@@ -438,6 +501,11 @@ class MainWindow(QMainWindow):
         self.ocr_fallback_box.setChecked(
             self._settings.value("options/ocr_fallback", True, type=bool)
         )
+        stored_com_ids = self._settings.value("options/com_prog_ids", [])
+        if isinstance(stored_com_ids, str):
+            stored_com_ids = [stored_com_ids]
+        if stored_com_ids:
+            self.com_prog_ids_input.setText(", ".join(stored_com_ids))
 
         stored_extensions = self._settings.value("options/extensions", [])
         if isinstance(stored_extensions, str):

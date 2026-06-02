@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
+import json
 from pathlib import Path
 
 import fitz
@@ -19,6 +21,69 @@ from PIL import Image
 
 from app.config import ConversionConfig
 from app.services.text_processing import clean_text
+
+
+def _co_initialize() -> object | None:
+    """Initialize COM for the current thread when pywin32 is available."""
+    try:
+        import pythoncom  # type: ignore
+
+        pythoncom.CoInitialize()
+        return pythoncom
+    except Exception:
+        return None
+
+
+def _co_uninitialize(pythoncom_module: object | None) -> None:
+    if pythoncom_module is None:
+        return
+    try:
+        pythoncom_module.CoUninitialize()
+    except Exception:
+        pass
+
+
+def probe_com_prog_id(prog_id: str) -> tuple[bool, str]:
+    """Probe whether a COM ProgID is dispatchable in this environment."""
+    if not prog_id.strip():
+        return False, "Empty COM ProgID"
+
+    # Use isolated subprocess probe to avoid UI hangs when COM dispatch stalls.
+    if getattr(sys, "frozen", False):
+        command = [
+            sys.executable,
+            "--probe-com-worker",
+            "--prog-id",
+            prog_id,
+        ]
+    else:
+        command = [
+            sys.executable,
+            "-m",
+            "main",
+            "--probe-com-worker",
+            "--prog-id",
+            prog_id,
+        ]
+
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+        output = (result.stdout or "").strip()
+        if not output:
+            detail = (result.stderr or "").strip() or f"Probe exit code {result.returncode}"
+            return False, detail
+        payload = json.loads(output)
+        if payload.get("ok"):
+            return True, str(payload.get("detail", "available"))
+        return False, str(payload.get("error", "Unknown probe error"))
+    except Exception as exc:
+        return False, str(exc)
 
 
 def configure_tesseract(path: Path | None) -> None:
@@ -154,6 +219,45 @@ def find_libreoffice_executable() -> str | None:
     return None
 
 
+def find_wps_executable() -> str | None:
+    candidates = [
+        "wps",
+        "wps.exe",
+        r"C:\Program Files\WPS Office\12.1.0.20305\office6\wps.exe",
+        r"C:\Program Files\WPS Office\11.2.0.11626\office6\wps.exe",
+        r"C:\Program Files\WPS Office\office6\wps.exe",
+        r"C:\Program Files (x86)\WPS Office\office6\wps.exe",
+        r"C:\Program Files\Kingsoft\WPS Office\office6\wps.exe",
+        r"C:\Program Files (x86)\Kingsoft\WPS Office\office6\wps.exe",
+    ]
+    for name in candidates:
+        path = shutil.which(name) if not Path(name).is_file() else name
+        if path and Path(path).is_file():
+            return path
+    return None
+
+
+def try_register_wps_com() -> str | None:
+    """Attempt to register WPS COM server and return status text."""
+    wps_path = find_wps_executable()
+    if not wps_path:
+        return None
+    try:
+        result = subprocess.run(
+            [wps_path, "/regserver"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        output = (result.stdout or "").strip() or (result.stderr or "").strip()
+        if result.returncode == 0:
+            return output or "WPS COM registration completed."
+        return output or f"WPS /regserver returned {result.returncode}."
+    except Exception as exc:
+        return f"WPS /regserver failed: {exc}"
+
+
 def extract_doc_with_libreoffice(doc_path: Path) -> str:
     soffice = find_libreoffice_executable()
     if not soffice:
@@ -185,6 +289,7 @@ def extract_doc_with_libreoffice(doc_path: Path) -> str:
 def extract_doc_with_word_com(doc_path: Path) -> str:
     import win32com.client  # type: ignore
 
+    pythoncom_module = _co_initialize()
     word = win32com.client.Dispatch("Word.Application")
     word.Visible = False
     doc = None
@@ -195,62 +300,81 @@ def extract_doc_with_word_com(doc_path: Path) -> str:
         if doc is not None:
             doc.Close(False)
         word.Quit()
+        _co_uninitialize(pythoncom_module)
 
 
-def extract_doc_with_wps_com(doc_path: Path) -> str:
-    """Try WPS Office COM automation for legacy .doc extraction."""
+def extract_doc_with_com(doc_path: Path, prog_ids: list[str]) -> str:
+    """Try COM automation using a list of ProgIDs."""
     import win32com.client  # type: ignore
 
-    # WPS COM ProgID can differ by installation/version.
-    candidates = [
-        "KWPS.Application",
-        "wps.Application",
-    ]
+    if not prog_ids:
+        raise RuntimeError("No COM ProgIDs were provided.")
+
+    pythoncom_module = _co_initialize()
     last_error: Exception | None = None
     app = None
-    for prog_id in candidates:
-        try:
-            app = win32com.client.Dispatch(prog_id)
-            break
-        except Exception as exc:
-            last_error = exc
-            app = None
-
-    if app is None:
-        raise RuntimeError(f"WPS COM automation is unavailable: {last_error}")
-
-    doc = None
     try:
-        # WPS generally supports the same Word-like object model here.
+        for _ in range(2):
+            for prog_id in prog_ids:
+                try:
+                    app = win32com.client.Dispatch(prog_id)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    app = None
+            if app is not None:
+                break
+            # If first COM attempt failed, try registering WPS and retry once.
+            try_register_wps_com()
+
+        if app is None:
+            tried = ", ".join(prog_ids)
+            raise RuntimeError(
+                f"COM automation is unavailable. Tried [{tried}]. Last error: {last_error}"
+            )
+
+        doc = None
         app.Visible = False
         doc = app.Documents.Open(str(doc_path.resolve()))
         return doc.Content.Text
     finally:
-        if doc is not None:
-            doc.Close(False)
-        app.Quit()
+        try:
+            if "doc" in locals() and doc is not None:
+                doc.Close(False)
+        finally:
+            if app is not None:
+                app.Quit()
+            _co_uninitialize(pythoncom_module)
 
 
-def extract_doc_pages_text(doc_path: Path) -> list[str]:
+def extract_doc_pages_text(
+    doc_path: Path,
+    office_com_prog_ids: list[str] | None = None,
+) -> list[str]:
     text: str | None = None
     errors: list[str] = []
+    configured_prog_ids = office_com_prog_ids or [
+        "Word.Application",
+        "KWPS.Application",
+        "wps.Application",
+    ]
 
     try:
-        text = extract_doc_with_word_com(doc_path)
+        text = extract_doc_with_com_subprocess(doc_path, configured_prog_ids)
     except Exception as exc:
-        errors.append(f"Word COM: {exc}")
-
-    if text is None:
-        try:
-            text = extract_doc_with_wps_com(doc_path)
-        except Exception as exc:
-            errors.append(f"WPS COM: {exc}")
+        errors.append(f"Configured COM: {exc}")
 
     if text is None:
         try:
             text = extract_doc_with_libreoffice(doc_path)
         except Exception as exc:
             errors.append(f"LibreOffice: {exc}")
+
+    if text is None:
+        try:
+            text = extract_doc_with_binary_fallback(doc_path)
+        except Exception as exc:
+            errors.append(f"Binary fallback: {exc}")
 
     if text is None:
         raise RuntimeError(
@@ -270,4 +394,109 @@ def extract_image_text(image_path: Path, ocr_languages: list[str]) -> list[str]:
     lang = "+".join(ocr_languages) if ocr_languages else "eng"
     text = pytesseract.image_to_string(image, lang=lang) or ""
     return [clean_text(text)] if text.strip() else []
+
+
+def extract_doc_with_binary_fallback(doc_path: Path) -> str:
+    """Best-effort text extraction from legacy .doc bytes.
+
+    This fallback is intentionally simple and used only when COM/libreoffice
+    are unavailable or blocked. It may include noise, but preserves usable
+    corpus content on locked-down systems.
+    """
+    raw = doc_path.read_bytes()
+    if not raw:
+        raise RuntimeError("Empty file.")
+
+    candidates = []
+    for encoding in ("utf-16le", "gb18030", "cp949", "utf-8", "latin-1"):
+        try:
+            decoded = raw.decode(encoding, errors="ignore")
+        except Exception:
+            continue
+        decoded = decoded.replace("\x00", "")
+        decoded = clean_text(decoded)
+        if len(decoded) > 20:
+            candidates.append(decoded)
+
+    if not candidates:
+        raise RuntimeError("Could not decode text from binary content.")
+
+    def score(text: str) -> int:
+        # Score by count of useful language chars.
+        return sum(ch.isalnum() or ("\u4e00" <= ch <= "\u9fff") for ch in text)
+
+    best = max(candidates, key=score)
+    # Keep only lines likely to contain human-readable content.
+    lines = []
+    for line in best.splitlines():
+        line = clean_text(line)
+        if len(line) < 2:
+            continue
+        useful = sum(
+            ch.isalnum() or ("\u4e00" <= ch <= "\u9fff") or ch in " .,;:!?-_/()[]{}"
+            for ch in line
+        )
+        if useful / max(len(line), 1) >= 0.55:
+            lines.append(line)
+
+    text = "\n".join(lines).strip()
+    if len(text) < 20:
+        raise RuntimeError("Binary fallback produced too little usable text.")
+    return text
+
+
+def extract_doc_with_com_subprocess(doc_path: Path, prog_ids: list[str]) -> str:
+    """Run COM extraction in isolated subprocess for EXE stability."""
+    errors: list[str] = []
+    for prog_id in prog_ids:
+        if getattr(sys, "frozen", False):
+            command = [
+                sys.executable,
+                "--doc-com-worker",
+                "--doc-path",
+                str(doc_path),
+                "--prog-ids",
+                prog_id,
+            ]
+        else:
+            command = [
+                sys.executable,
+                "-m",
+                "main",
+                "--doc-com-worker",
+                "--doc-path",
+                str(doc_path),
+                "--prog-ids",
+                prog_id,
+            ]
+
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=45,
+            )
+        except subprocess.TimeoutExpired:
+            errors.append(f"{prog_id}: timed out after 45 seconds")
+            continue
+
+        output = (result.stdout or "").strip()
+        if not output:
+            detail = result.stderr.strip() or f"worker exit code {result.returncode}"
+            errors.append(f"{prog_id}: {detail}")
+            continue
+
+        try:
+            payload = json.loads(output)
+        except Exception:
+            errors.append(f"{prog_id}: invalid worker output")
+            continue
+
+        if payload.get("ok"):
+            return str(payload.get("text", ""))
+        errors.append(f"{prog_id}: {payload.get('error', 'Unknown COM worker error')}")
+
+    raise RuntimeError("; ".join(errors) if errors else "No COM ProgID attempts were executed")
 

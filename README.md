@@ -9,11 +9,13 @@ A production-style Python project that converts document files into raw corpus `
 - Tesseract OCR executable path selection (`tesseract.exe`)
 - Automatic OCR language discovery from installed Tesseract language packs
 - Multi-language OCR selection (e.g., `eng`, `kor`, etc.)
+- Configurable Office COM ProgIDs for `.doc` extraction (Word/WPS/custom)
 - Single-file or full-folder conversion
 - Extension filtering in UI
 - OCR fallback for low-text PDF pages
 - Structured corpus output with paragraph-level `[SEP]` separators
 - Persistent settings (last paths, selected languages, options)
+- Built-in **System Check** button for deployment diagnostics
 
 ## Supported Input Extensions
 
@@ -64,9 +66,10 @@ Workflow:
 1. Select `tesseract.exe`
 2. Click **Load & Detect Languages**
 3. Choose OCR languages
-4. Choose single file or input folder
-5. Choose output folder
-6. Configure options and click **Start Conversion**
+4. (Optional) Set Office COM ProgIDs for `.doc` compatibility
+5. Choose single file or input folder
+6. Choose output folder
+7. Configure options and click **Start Conversion**
 
 ## Build Windows EXE (PyInstaller)
 
@@ -95,9 +98,16 @@ Clean build (remove previous `build/` and `dist/` first):
 .\scripts\build_windows.ps1 -VenvPath "D:\path\to\your\venv" -Clean
 ```
 
+Debug build with visible console output (recommended when EXE behaves differently):
+
+```powershell
+.\scripts\build_windows.ps1 -VenvPath "D:\path\to\your\venv" -Clean -Console
+```
+
 Generated executable:
 
 - `dist/CorpusConverter/CorpusConverter.exe`
+- Runtime log file: `%USERPROFILE%\CorpusConverter\logs\app.log`
 
 ## Notes
 

@@ -1,12 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_submodules
+
+binaries = []
+hiddenimports = ['win32com', 'win32com.client', 'win32timezone', 'pythoncom', 'pywintypes']
+binaries += collect_dynamic_libs('pywin32')
+hiddenimports += collect_submodules('win32com')
 
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=[('app/assets', 'app/assets')],
-    hiddenimports=[],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -37,7 +37,7 @@ def convert_one_file_to_corpus(file_path: Path, config: ConversionConfig) -> str
     elif suffix == ".docx":
         pages_text = extract_docx_pages_text(file_path)
     elif suffix == ".doc":
-        pages_text = extract_doc_pages_text(file_path)
+        pages_text = extract_doc_pages_text(file_path, config.office_com_prog_ids)
     elif suffix in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}:
         pages_text = extract_image_text(file_path, config.ocr_languages)
     else:

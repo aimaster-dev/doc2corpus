@@ -18,6 +18,12 @@ DEFAULT_SUPPORTED_EXTENSIONS = [
     ".tiff",
 ]
 
+DEFAULT_COM_PROG_IDS = [
+    "Word.Application",
+    "KWPS.Application",
+    "wps.Application",
+]
+
 
 @dataclass(slots=True)
 class ConversionConfig:
@@ -32,4 +38,7 @@ class ConversionConfig:
     enable_ocr_fallback: bool = True
     ocr_dpi: int = 200
     min_plain_text_length: int = 20
+    office_com_prog_ids: list[str] = field(
+        default_factory=lambda: DEFAULT_COM_PROG_IDS.copy()
+    )
 

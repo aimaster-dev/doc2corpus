@@ -2,12 +2,42 @@ param(
     [Parameter(HelpMessage = "Path to virtual environment folder (e.g. D:\envs\llmenv) or to python.exe")]
     [string]$VenvPath = "",
 
-    [switch]$Clean
+    [switch]$Clean,
+    [switch]$Console
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Resolve-Path "$PSScriptRoot\.."
 Set-Location $ProjectRoot
+
+function Remove-DirectoryWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PathToRemove,
+        [int]$MaxAttempts = 5
+    )
+
+    if (-not (Test-Path $PathToRemove)) {
+        return
+    }
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            Remove-Item -Recurse -Force $PathToRemove -ErrorAction Stop
+            return
+        }
+        catch {
+            if ($attempt -eq 1) {
+                # Common lock source: previously launched app still running.
+                Get-Process -Name "CorpusConverter*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            }
+            Start-Sleep -Milliseconds (300 * $attempt)
+            if ($attempt -eq $MaxAttempts) {
+                throw "Failed to remove '$PathToRemove' after $MaxAttempts attempts. Close running EXE/processes and retry."
+            }
+        }
+    }
+}
 
 function Resolve-PythonExecutable {
     param([string]$PathInput)
@@ -62,8 +92,8 @@ Write-Host "Project root: $ProjectRoot"
 Write-Host ""
 
 if ($Clean) {
-    if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
-    if (Test-Path "dist") { Remove-Item -Recurse -Force "dist" }
+    Remove-DirectoryWithRetry -PathToRemove "build"
+    Remove-DirectoryWithRetry -PathToRemove "dist"
     Write-Host "Cleaned build/ and dist/"
 }
 
@@ -71,12 +101,28 @@ if ($Clean) {
 & $PythonExe -m pip install -r requirements.txt
 & $PythonExe -m pip install pyinstaller
 
-& $PythonExe -m PyInstaller `
-  --noconfirm `
-  --windowed `
-  --name "CorpusConverter" `
-  --add-data "app/assets;app/assets" `
-  main.py
+$PyInstallerArgs = @(
+    "--noconfirm"
+    "--name", "CorpusConverter"
+    "--hidden-import", "win32com"
+    "--hidden-import", "win32com.client"
+    "--hidden-import", "win32timezone"
+    "--hidden-import", "pythoncom"
+    "--hidden-import", "pywintypes"
+    "--collect-submodules", "win32com"
+    "--collect-binaries", "pywin32"
+    "--add-data", "app/assets;app/assets"
+    "main.py"
+)
+
+if ($Console) {
+    $PyInstallerArgs += "--console"
+}
+else {
+    $PyInstallerArgs += "--windowed"
+}
+
+& $PythonExe -m PyInstaller @PyInstallerArgs
 
 Write-Host ""
 Write-Host "Build complete."
